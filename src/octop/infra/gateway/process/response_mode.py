@@ -115,6 +115,48 @@ async def collapse_to_invoke_response(
         yield event
 
 
+async def withhold_weixin_stream_preamble(
+    events: AsyncIterator[MessageEvent],
+) -> AsyncIterator[MessageEvent]:
+    """Drop text that is only the lead-in to a tool call.
+
+    Used for WeChat team hosts, which stay on stream mode. Other channels are
+    unchanged. ``ask_agent`` narration is kept so a team host can still say who
+    it is calling. Media and the final answer pass through in their own order.
+    """
+    held: list[MessageEvent] = []
+
+    def _hold(event: MessageEvent) -> bool:
+        return event.type in (
+            MessageEventType.DELTA,
+            MessageEventType.FLUSH,
+            MessageEventType.THINKING,
+            MessageEventType.THINKING_DELTA,
+        )
+
+    async for event in events:
+        if _hold(event):
+            held.append(event)
+            continue
+        if event.type == MessageEventType.TOOL_START:
+            meta = event.metadata if isinstance(event.metadata, dict) else {}
+            tool_key = str(meta.get("tool_key") or meta.get("tool_name") or "")
+            if tool_key != "ask_agent":
+                held.clear()
+            else:
+                for item in held:
+                    yield item
+                held.clear()
+            yield event
+            continue
+        for item in held:
+            yield item
+        held.clear()
+        yield event
+    for item in held:
+        yield item
+
+
 def processor_for_response_mode(
     processor: MessageProcessor,
     mode: ChannelResponseMode,
@@ -137,4 +179,5 @@ __all__ = [
     "normalize_channel_response_mode",
     "processor_for_response_mode",
     "qq_channel_response_mode",
+    "withhold_weixin_stream_preamble",
 ]

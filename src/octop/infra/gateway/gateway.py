@@ -6,7 +6,7 @@ import asyncio
 import json
 import logging
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -28,6 +28,7 @@ from octop.infra.gateway.process.response_mode import (
     normalize_channel_response_mode,
     processor_for_response_mode,
     qq_channel_response_mode,
+    withhold_weixin_stream_preamble,
 )
 from octop.infra.gateway.slash.dispatcher import SlashDispatcher, build_default_dispatcher
 from octop.infra.gateway.threads import ThreadRegistry
@@ -701,6 +702,14 @@ class Gateway:
         else:
             response_mode = normalize_channel_response_mode(config.get("response_mode"))
         processor = processor_for_response_mode(self._processor, response_mode)
+        if row.kind == "weixin" and response_mode == "stream":
+            stream_processor = processor
+
+            async def _weixin_stream(message: Any) -> AsyncIterator[Any]:
+                async for event in withhold_weixin_stream_preamble(stream_processor(message)):
+                    yield event
+
+            processor = _weixin_stream
         manager = self._require_channel_manager()
         await manager.add_channel(
             row.kind,
@@ -715,6 +724,21 @@ class Gateway:
             if backend is not None:
                 registered.set_media_backend(backend)
         self._set_runtime_status(row.channel_id, connected=True)
+        if row.kind == "weixin" and registered is not None:
+            listener = getattr(registered, "set_context_token_listener", None)
+            if listener is not None:
+                channel = registered
+
+                def _persist(account_id: str, user_id: str, token: str, token_ms: int) -> None:
+                    del account_id
+                    self._repos.session_repo.remember_weixin_context_token(
+                        agent_id=str(channel.tenant_id or row.agent_id),
+                        subject_id=user_id,
+                        token=token,
+                        token_ms=token_ms,
+                    )
+
+                listener(_persist)
 
     def _config_from_row(self, row: ChannelRow) -> dict[str, Any]:
         """Parse the stored JSON config; alias/normalize happens in ``Config.from_dict``."""
