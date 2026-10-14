@@ -10,10 +10,11 @@ from octop_gateway.models import ChannelSubject
 
 from octop.infra.db.pool import DatabasePool
 from octop.infra.db.repos._base import DbRow, now_ts, sql_in_placeholders
-
-# Must match octop_gateway.push_routing. The installed gateway may predate that export.
-WEIXIN_CONTEXT_TOKEN_KEY = "weixin_context_token"
-WEIXIN_CONTEXT_TOKEN_MS_KEY = "weixin_context_token_ms"
+from octop.infra.utils.weixin_context import (
+    merge_weixin_context_token,
+    selected_weixin_token,
+    with_weixin_send_token,
+)
 
 
 def _decode_metadata(raw: str | None) -> dict[str, Any] | None:
@@ -30,32 +31,6 @@ def _encode_metadata(meta: dict[str, Any] | None) -> str | None:
     if not meta:
         return None
     return json.dumps(meta, ensure_ascii=False)
-
-
-def _token_ms(meta: dict[str, Any] | None) -> int:
-    if not meta:
-        return 0
-    try:
-        return int(meta.get(WEIXIN_CONTEXT_TOKEN_MS_KEY) or 0)
-    except (TypeError, ValueError):
-        return 0
-
-
-def merge_weixin_context_token(
-    existing: dict[str, Any] | None,
-    new: dict[str, Any] | None,
-) -> dict[str, Any]:
-    """Keep the newer WeChat send token. An empty write must not clear it."""
-    merged = dict(new or {})
-    old = existing or {}
-    old_token = str(old.get(WEIXIN_CONTEXT_TOKEN_KEY) or "").strip()
-    new_token = str(merged.get(WEIXIN_CONTEXT_TOKEN_KEY) or "").strip()
-    old_ms = _token_ms(old)
-    new_ms = _token_ms(merged)
-    if old_token and (not new_token or old_ms > new_ms):
-        merged[WEIXIN_CONTEXT_TOKEN_KEY] = old_token
-        merged[WEIXIN_CONTEXT_TOKEN_MS_KEY] = old_ms
-    return merged
 
 
 def _backfill_channel_fields(
@@ -217,7 +192,10 @@ class SessionRepo:
         token: str,
         token_ms: int,
     ) -> None:
-        """Store a newer iLink send token on matching WeChat sessions."""
+        """Store a newer iLink send token on matching WeChat sessions.
+
+        A session that already holds a newer token is left unchanged.
+        """
         cleaned = token.strip()
         if not cleaned or token_ms <= 0 or not agent_id or not subject_id:
             return
@@ -229,13 +207,11 @@ class SessionRepo:
             ).fetchall()
             for row in rows:
                 current = _decode_metadata(row["channel_metadata"]) or {}
-                candidate = dict(current)
-                candidate[WEIXIN_CONTEXT_TOKEN_KEY] = cleaned
-                candidate[WEIXIN_CONTEXT_TOKEN_MS_KEY] = token_ms
-                merged = merge_weixin_context_token(current, candidate)
-                if str(merged.get(WEIXIN_CONTEXT_TOKEN_KEY) or "") != cleaned:
-                    continue
-                if _token_ms(merged) != token_ms:
+                merged = merge_weixin_context_token(
+                    current,
+                    with_weixin_send_token(current, cleaned, token_ms),
+                )
+                if not selected_weixin_token(merged, cleaned, token_ms):
                     continue
                 conn.execute(
                     "UPDATE sessions SET channel_metadata = ?, updated_at = ? WHERE session_key = ?",

@@ -2,16 +2,13 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from octop_gateway.models import ImageContent, InboundMessage
 
 from octop.infra.gateway.threads import ThreadRegistry
-
-# Same strings as octop_gateway.push_routing / sessions. Kept local so Octop
-# can run against a gateway build that does not export the names yet.
-_WEIXIN_CONTEXT_TOKEN_KEY = "weixin_context_token"
-_WEIXIN_CONTEXT_TOKEN_MS_KEY = "weixin_context_token_ms"
+from octop.infra.utils.weixin_context import with_weixin_send_token
 
 # Persisted on HumanMessage.additional_kwargs for dashboard history UI.
 COMPOSER_CTX_KEY = "octop_composer_context"
@@ -174,17 +171,13 @@ def session_metadata_from_message(msg: InboundMessage) -> dict[str, object]:
     ``context_token`` stays ephemeral for every channel. WeChat also keeps a
     separate copy so a later cron push can still address the conversation.
     """
-    import time
-
     meta = sanitize_im_metadata(msg)
     if (msg.channel_type or "") != "weixin":
         return meta
     token = str((msg.metadata or {}).get("context_token") or "").strip()
     if not token:
         return meta
-    meta[_WEIXIN_CONTEXT_TOKEN_KEY] = token
-    meta[_WEIXIN_CONTEXT_TOKEN_MS_KEY] = int(time.time() * 1000)
-    return meta
+    return with_weixin_send_token(meta, token, int(time.time() * 1000))
 
 
 def sanitize_im_metadata(msg: InboundMessage) -> dict[str, object]:

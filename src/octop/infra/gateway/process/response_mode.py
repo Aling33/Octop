@@ -115,6 +115,26 @@ async def collapse_to_invoke_response(
         yield event
 
 
+_WEIXIN_PREAMBLE_TYPES = frozenset(
+    {
+        MessageEventType.DELTA,
+        MessageEventType.FLUSH,
+        MessageEventType.THINKING,
+        MessageEventType.THINKING_DELTA,
+    }
+)
+
+
+def _weixin_tool_key(event: MessageEvent) -> str:
+    meta = event.metadata if isinstance(event.metadata, dict) else {}
+    return str(meta.get("tool_key") or meta.get("tool_name") or "")
+
+
+def _drops_weixin_preamble(event: MessageEvent) -> bool:
+    """Tool calls other than ``ask_agent`` discard the text that led into them."""
+    return event.type == MessageEventType.TOOL_START and _weixin_tool_key(event) != "ask_agent"
+
+
 async def withhold_weixin_stream_preamble(
     events: AsyncIterator[MessageEvent],
 ) -> AsyncIterator[MessageEvent]:
@@ -125,36 +145,27 @@ async def withhold_weixin_stream_preamble(
     it is calling. Media and the final answer pass through in their own order.
     """
     held: list[MessageEvent] = []
-
-    def _hold(event: MessageEvent) -> bool:
-        return event.type in (
-            MessageEventType.DELTA,
-            MessageEventType.FLUSH,
-            MessageEventType.THINKING,
-            MessageEventType.THINKING_DELTA,
-        )
-
     async for event in events:
-        if _hold(event):
+        if event.type in _WEIXIN_PREAMBLE_TYPES:
             held.append(event)
             continue
-        if event.type == MessageEventType.TOOL_START:
-            meta = event.metadata if isinstance(event.metadata, dict) else {}
-            tool_key = str(meta.get("tool_key") or meta.get("tool_name") or "")
-            if tool_key != "ask_agent":
-                held.clear()
-            else:
-                for item in held:
-                    yield item
-                held.clear()
-            yield event
-            continue
-        for item in held:
-            yield item
+        if not _drops_weixin_preamble(event):
+            for item in held:
+                yield item
         held.clear()
         yield event
     for item in held:
         yield item
+
+
+def wrap_weixin_stream_processor(processor: MessageProcessor) -> MessageProcessor:
+    """Hide tool lead-in text before a WeChat stream processor emits it."""
+
+    async def _wrapped(message: InboundMessage) -> AsyncIterator[MessageEvent]:
+        async for event in withhold_weixin_stream_preamble(processor(message)):
+            yield event
+
+    return _wrapped
 
 
 def processor_for_response_mode(
@@ -180,4 +191,5 @@ __all__ = [
     "processor_for_response_mode",
     "qq_channel_response_mode",
     "withhold_weixin_stream_preamble",
+    "wrap_weixin_stream_processor",
 ]

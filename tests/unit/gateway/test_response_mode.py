@@ -183,7 +183,7 @@ async def test_weixin_stream_drops_preamble_but_keeps_ask_agent() -> None:
 
 
 def test_newer_weixin_token_is_kept() -> None:
-    from octop.infra.db.repos.sessions import (
+    from octop.infra.utils.weixin_context import (
         WEIXIN_CONTEXT_TOKEN_KEY,
         WEIXIN_CONTEXT_TOKEN_MS_KEY,
         merge_weixin_context_token,
